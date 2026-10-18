@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 export default function DataNote() {
   return (
     <section className="border-t border-white/5">
@@ -12,12 +14,12 @@ export default function DataNote() {
               (roughly 7 km).
             </p>
           </div>
-          <button
-            type="button"
-            className="h-11 shrink-0 rounded-full bg-amber-400 px-6 text-sm font-semibold text-zinc-950 transition-colors hover:bg-amber-300"
+          <Link
+            href="/map"
+            className="flex h-11 shrink-0 items-center rounded-full bg-amber-400 px-6 text-sm font-semibold text-zinc-950 transition-colors hover:bg-amber-300"
           >
             Explore the map
-          </button>
+          </Link>
         </div>
       </div>
     </section>

@@ -1,3 +1,4 @@
+import Link from "next/link";
 import MapPreview from "./MapPreview";
 
 export default function Hero() {
@@ -21,18 +22,18 @@ export default function Hero() {
             last 8 weeks.
           </p>
           <div className="flex flex-col gap-3 sm:flex-row">
-            <button
-              type="button"
-              className="h-12 rounded-full bg-amber-400 px-6 text-sm font-semibold text-zinc-950 transition-colors hover:bg-amber-300"
+            <Link
+              href="/map"
+              className="flex h-12 items-center justify-center rounded-full bg-amber-400 px-6 text-sm font-semibold text-zinc-950 transition-colors hover:bg-amber-300"
             >
               View this week&apos;s map
-            </button>
-            <button
-              type="button"
-              className="h-12 rounded-full border border-white/10 px-6 text-sm font-medium text-zinc-200 transition-colors hover:bg-white/5"
+            </Link>
+            <Link
+              href="#how"
+              className="flex h-12 items-center justify-center rounded-full border border-white/10 px-6 text-sm font-medium text-zinc-200 transition-colors hover:bg-white/5"
             >
               How it works
-            </button>
+            </Link>
           </div>
         </div>
         <MapPreview />
