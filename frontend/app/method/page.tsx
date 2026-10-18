@@ -98,9 +98,10 @@ export default async function MethodPage() {
             <Figure label="ROC AUC" value={(m.roc_auc ?? 0).toFixed(3)} note="Separability across all thresholds." />
           </div>
           <p className="mt-4" style={{ fontSize: "var(--t-12)", color: "var(--text-muted)" }}>
-            Published by the backend{m.n_test ? ` from ${m.n_test.toLocaleString()} held-out patches` : ""}
+            {m.source === "api" ? "Served live by the model API" : "Snapshot published by the backend"}
+            {m.n_test ? `, measured on ${m.n_test.toLocaleString()} held-out patches` : ""}
             {m.threshold ? ` at a threshold of ${m.threshold.toFixed(2)}` : ""}. These are the
-            model&rsquo;s own figures, not derived by this frontend.
+            model&rsquo;s own figures — this frontend does not compute them.
           </p>
         </Reveal>
       ) : (

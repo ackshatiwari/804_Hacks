@@ -44,3 +44,4 @@ frontend/next-env.d.ts
 
 # backend
 backend/venv
+backend/data

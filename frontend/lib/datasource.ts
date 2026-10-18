@@ -143,11 +143,36 @@ export async function getHotspots(): Promise<HotspotResult> {
  * Model metrics, if the backend publishes any. Returns null while the model is
  * still being trained - the UI must render that state, never a stand-in.
  */
-export async function getModelMetrics(): Promise<ModelMetrics | null> {
+export async function getModelMetrics(): Promise<
+  (ModelMetrics & { source: "api" | "snapshot" }) | null
+> {
   "use cache";
   cacheLife("hours");
 
-  if (!usingApi()) return null;
-  const m = await getJson<ModelMetrics>("/model/metrics");
-  return m && typeof m.f1 === "number" ? m : null;
+  // Live API first - it is the backend's own answer and always current.
+  if (usingApi()) {
+    const m = await getJson<ModelMetrics>("/model/metrics");
+    if (m && typeof m.f1 === "number") return { ...m, source: "api" };
+  }
+
+  // Otherwise a snapshot the backend published into public/. These are the
+  // model's own figures, copied verbatim - the frontend never computes them,
+  // and the UI says it is a snapshot so nobody reads it as a live score.
+  const snap = await readSnapshot();
+  return snap ? { ...snap, source: "snapshot" } : null;
+}
+
+async function readSnapshot(): Promise<ModelMetrics | null> {
+  try {
+    const { readFile } = await import("node:fs/promises");
+    const path = await import("node:path");
+    const raw = await readFile(
+      path.join(process.cwd(), "public", "model-metrics.json"),
+      "utf8",
+    );
+    const m = JSON.parse(raw) as ModelMetrics;
+    return typeof m?.f1 === "number" ? m : null;
+  } catch {
+    return null;
+  }
 }
