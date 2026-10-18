@@ -1,4 +1,4 @@
-import PlumeCard from "./PlumeCard";
+import PlumeCard from "./PlumeCardMock";
 
 // Decorative positions only (percent of the map frame), not real detections.
 const plumes = [
