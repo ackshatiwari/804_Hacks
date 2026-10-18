@@ -1,22 +1,20 @@
 import type { Metadata } from "next";
-import { Archivo, IBM_Plex_Mono } from "next/font/google";
+import { Figtree } from "next/font/google";
+
+import { SiteNav } from "@/components/SiteNav";
 
 import "./globals.css";
 
-const archivo = Archivo({
-  variable: "--font-archivo",
+// One face, as Aspen does. Figtree carries real tabular figures, so data
+// columns align without a second, terminal-looking monospace family.
+const figtree = Figtree({
+  variable: "--font-figtree",
   subsets: ["latin"],
-  axes: ["wdth"],
-});
-
-const plexMono = IBM_Plex_Mono({
-  variable: "--font-plex-mono",
-  subsets: ["latin"],
-  weight: ["400", "500", "600"],
+  weight: ["400", "500", "600", "700", "800"],
 });
 
 export const metadata: Metadata = {
-  title: "Methane Watch - weekly plume map",
+  title: "Methane Watch",
   description:
     "Satellites see methane plumes every week. This map shows where they are and which ones keep coming back.",
 };
@@ -26,7 +24,8 @@ export default function RootLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en">
-      <body className={`${archivo.variable} ${plexMono.variable}`}>
+      <body className={figtree.variable}>
+        <SiteNav />
         {children}
       </body>
     </html>

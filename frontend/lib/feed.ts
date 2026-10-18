@@ -2,9 +2,11 @@ import { cacheLife } from "next/cache";
 
 import {
   buildFeed,
+  buildHotspots,
   emptyFeed,
   parseDetections,
   PLUMES_CSV_URL,
+  type Hotspot,
   type PlumeFeed,
 } from "./plumes";
 
@@ -41,5 +43,33 @@ export async function fetchFeed(): Promise<PlumeFeed> {
     return emptyFeed(
       err instanceof Error ? err.message : "could not reach the CAMS feed",
     );
+  }
+}
+
+/** Every spot in the repeat window, ranked by persistence. */
+export async function fetchHotspots(): Promise<{
+  spots: Hotspot[];
+  windowStart: string;
+  latestDate: string;
+  error?: string;
+}> {
+  "use cache";
+  cacheLife("hours");
+
+  try {
+    const res = await fetch(PLUMES_CSV_URL, { signal: AbortSignal.timeout(30_000) });
+    if (!res.ok) {
+      const today = new Date().toISOString().slice(0, 10);
+      return { spots: [], windowStart: today, latestDate: today, error: `CAMS returned ${res.status}` };
+    }
+    return buildHotspots(parseDetections(await res.text()));
+  } catch (err) {
+    const today = new Date().toISOString().slice(0, 10);
+    return {
+      spots: [],
+      windowStart: today,
+      latestDate: today,
+      error: err instanceof Error ? err.message : "could not reach the CAMS feed",
+    };
   }
 }

@@ -332,3 +332,135 @@ export function buildFeed(
     generatedAt,
   };
 }
+
+// ---------------------------------------------------------------- hotspots
+
+export type Hotspot = {
+  id: string;
+  lat: number;
+  lon: number;
+  country: string;
+  sourceType: SourceType;
+  /** Detections at this spot across the repeat window. */
+  detections: number;
+  /** Distinct weeks it was seen in, out of REPEAT_WINDOW_WEEKS. */
+  weeksSeen: number;
+  weeklyHistory: number[];
+  maxRate: number;
+  meanRate: number;
+  firstSeen: string;
+  lastSeen: string;
+  /** True if it also appears in the most recent week. */
+  activeThisWeek: boolean;
+  severity: Severity;
+  /** 0-100, persistence-weighted: this page is about chronic emitters. */
+  persistence: number;
+};
+
+/**
+ * Cluster every detection in the repeat window into physical spots.
+ *
+ * Greedy single-pass clustering: detections are taken strongest-first, and each
+ * one either joins a spot within SAME_SPOT_KM or starts a new one. Strongest
+ * first means a cluster is anchored on its biggest plume rather than on whichever
+ * row happened to come first, which keeps centroids on the actual source.
+ */
+export function buildHotspots(
+  detections: Detection[],
+  now: Date = new Date(),
+): { spots: Hotspot[]; windowStart: string; latestDate: string } {
+  if (detections.length === 0) {
+    const today = now.toISOString().slice(0, 10);
+    return { spots: [], windowStart: today, latestDate: today };
+  }
+
+  const latestDate = detections[detections.length - 1].date;
+  const windowStart = addDays(latestDate, -(REPEAT_WINDOW_WEEKS * 7 - 1));
+  const weekStart = addDays(latestDate, -6);
+  const inWindow = detections
+    .filter((d) => d.date >= windowStart)
+    .sort((a, b) => b.rate - a.rate);
+
+  const clusters: { anchor: Detection; members: Detection[] }[] = [];
+  const latBandDeg = SAME_SPOT_KM / 111.32;
+  const byBand = new Map<number, number[]>(); // lat band -> cluster indices
+
+  for (const d of inWindow) {
+    const band = Math.floor(d.lat / latBandDeg);
+    let found = -1;
+    for (const b of [band - 1, band, band + 1]) {
+      for (const ci of byBand.get(b) ?? []) {
+        const a = clusters[ci].anchor;
+        if (haversineKm(d.lat, d.lon, a.lat, a.lon) <= SAME_SPOT_KM) {
+          found = ci;
+          break;
+        }
+      }
+      if (found >= 0) break;
+    }
+
+    if (found >= 0) {
+      clusters[found].members.push(d);
+    } else {
+      const ci = clusters.length;
+      clusters.push({ anchor: d, members: [d] });
+      const b = Math.floor(d.lat / latBandDeg);
+      for (const bb of [b - 1, b, b + 1]) {
+        const arr = byBand.get(bb);
+        if (arr) arr.push(ci);
+        else byBand.set(bb, [ci]);
+      }
+    }
+  }
+
+  const spots: Hotspot[] = clusters.map(({ anchor, members }) => {
+    const weeklyHistory = new Array<number>(REPEAT_WINDOW_WEEKS).fill(0);
+    for (const m of members) {
+      const idx =
+        REPEAT_WINDOW_WEEKS - 1 - Math.floor(daysBetween(m.date, latestDate) / 7);
+      if (idx >= 0 && idx < REPEAT_WINDOW_WEEKS) weeklyHistory[idx] += 1;
+    }
+
+    const rates = members.map((m) => m.rate);
+    const dates = members.map((m) => m.date).sort();
+    const weeksSeen = weeklyHistory.filter((n) => n > 0).length;
+    const maxRate = Math.max(...rates);
+
+    // Majority infrastructure type at the spot, not just the anchor's.
+    const typeCounts = new Map<SourceType, number>();
+    for (const m of members) {
+      typeCounts.set(m.sourceType, (typeCounts.get(m.sourceType) ?? 0) + 1);
+    }
+    const sourceType = [...typeCounts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+
+    // Persistence-weighted: weeks seen leads, magnitude modulates. The map
+    // ranks by criticality; this page is explicitly about chronic emitters.
+    const persistence = Math.round(
+      Math.min(1, weeksSeen / REPEAT_WINDOW_WEEKS) * 65 +
+        Math.min(1, Math.log10(1 + maxRate) / Math.log10(1 + 200)) * 35,
+    );
+
+    return {
+      id: `${anchor.lat.toFixed(2)},${anchor.lon.toFixed(2)}`,
+      lat: anchor.lat,
+      lon: anchor.lon,
+      country: anchor.country,
+      sourceType,
+      detections: members.length,
+      weeksSeen,
+      weeklyHistory,
+      maxRate,
+      meanRate: Math.round(rates.reduce((a, b) => a + b, 0) / rates.length),
+      firstSeen: dates[0],
+      lastSeen: dates[dates.length - 1],
+      activeThisWeek: dates[dates.length - 1] >= weekStart,
+      severity: severityFor(scoreCriticality(maxRate, members.length)),
+      persistence,
+    };
+  });
+
+  spots.sort(
+    (a, b) => b.persistence - a.persistence || b.detections - a.detections,
+  );
+  return { spots, windowStart, latestDate };
+}
