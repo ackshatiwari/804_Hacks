@@ -1,7 +1,7 @@
 import { Suspense } from "react";
 
 import { HotspotsTable } from "@/components/HotspotsTable";
-import { fetchFeed, fetchHotspots } from "@/lib/feed";
+import { getHotspots, getWeeklyFeed } from "@/lib/datasource";
 import { formatRange } from "@/lib/format";
 import { REPEAT_WINDOW_WEEKS, SAME_SPOT_KM } from "@/lib/plumes";
 
@@ -9,8 +9,8 @@ export const metadata = { title: "Hotspots · Methane Watch" };
 
 async function Body() {
   const [{ spots, windowStart, latestDate, error }, feed] = await Promise.all([
-    fetchHotspots(),
-    fetchFeed(),
+    getHotspots(),
+    getWeeklyFeed(),
   ]);
 
   const chronic = spots.filter((s) => s.weeksSeen >= 3).length;
@@ -59,6 +59,10 @@ async function Body() {
             Persistence weights how many weeks a spot appeared over how large its
             peak plume was — the opposite emphasis to the map&rsquo;s criticality
             score, which leads on emission rate. Showing at most 120 spots.
+          </p>
+          <p className="mt-2" style={{ fontSize: "var(--t-12)", color: "var(--text-muted)", lineHeight: 1.6 }}>
+            Both scores are computed from fields already present in the
+            detection dataset. Neither is a model prediction.
           </p>
         </>
       )}

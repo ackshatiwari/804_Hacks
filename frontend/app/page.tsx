@@ -3,7 +3,7 @@ import { Suspense } from "react";
 
 import { Reveal } from "@/components/Reveal";
 import { SEVERITY_SOFT, SEVERITY_VAR, formatRange } from "@/lib/format";
-import { fetchFeed } from "@/lib/feed";
+import { getWeeklyFeed } from "@/lib/datasource";
 import {
   LOCATION_PRECISION_KM,
   REPEAT_WINDOW_WEEKS,
@@ -304,7 +304,7 @@ function Caveats({ feed }: { feed: PlumeFeed }) {
 }
 
 async function Page_() {
-  const feed = await fetchFeed();
+  const feed = await getWeeklyFeed();
   return (
     <main>
       <Hero feed={feed} />

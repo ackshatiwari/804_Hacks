@@ -1,5 +1,5 @@
 import { AiUnavailable, generate, type AiMode } from "@/lib/ai";
-import { fetchFeed } from "@/lib/feed";
+import { getWeeklyFeed } from "@/lib/datasource";
 
 const MODES: AiMode[] = ["brief", "explain", "chat", "dossier"];
 
@@ -29,7 +29,7 @@ export async function POST(req: Request) {
     return Response.json({ error: "Ask a question first." }, { status: 400 });
   }
 
-  const feed = await fetchFeed();
+  const feed = await getWeeklyFeed();
   if (feed.error) {
     return Response.json(
       { error: `No live data to summarise - ${feed.error}` },

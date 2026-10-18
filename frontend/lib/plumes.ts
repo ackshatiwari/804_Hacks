@@ -21,7 +21,22 @@ export const REPEAT_WINDOW_WEEKS = 8;
 /** TROPOMI pixel size, i.e. how precise a single location can be. */
 export const LOCATION_PRECISION_KM = 7;
 
+import {
+  scoreCriticality,
+  scorePersistence,
+  severityFor,
+  type Severity,
+} from "./scoring";
+
 const EARTH_RADIUS_KM = 6371;
+
+export type { Severity, ScoreSource } from "./scoring";
+export {
+  SCORE_SOURCE_LABEL,
+  scoreCriticality,
+  severityFor,
+  scorePersistence,
+} from "./scoring";
 
 export type SourceType = "Coal" | "Oil" | "Gas" | "Landfill" | "Unclassified";
 
@@ -39,8 +54,6 @@ export type Detection = {
   sourceType: SourceType;
   country: string;
 };
-
-export type Severity = "low" | "moderate" | "high" | "severe";
 
 export type Plume = Detection & {
   /** Detections within SAME_SPOT_KM over the repeat window, this one included. */
@@ -192,37 +205,6 @@ export function parseDetections(csv: string): Detection[] {
 
   out.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
   return out;
-}
-
-// ---------------------------------------------------------------- scoring
-
-/**
- * Criticality blends how big the plume is with how often the spot reoffends.
- *
- * Rate carries most of the weight because it is a measured quantity; the
- * repeat term is a bounded bonus so a persistent medium leak outranks a
- * one-off medium leak without ever swamping a genuinely huge single plume.
- * Both halves are capped, so the score stays in 0-100.
- */
-export function scoreCriticality(rate: number, repeatCount: number): number {
-  // log10(1 + 200 t/h) is the reference ceiling: ~200 t/h is a genuinely huge
-  // plume, well past the feed's 90th percentile (~100 t/h). Anything larger
-  // already pins the rate term, so the repeat bonus decides the ordering.
-  const RATE_CEILING = Math.log10(1 + 200);
-  const rateScore =
-    Math.min(1, Math.log10(1 + Math.max(0, rate)) / RATE_CEILING) * 75;
-  const repeatScore = Math.min(1, Math.max(0, repeatCount - 1) / 5) * 25;
-  return Math.round(rateScore + repeatScore);
-}
-
-export function severityFor(criticality: number): Severity {
-  // Tuned against the live feed so a typical week reads as a handful of
-  // genuinely bad events against a mostly moderate background, rather than
-  // an all-red map that conveys nothing.
-  if (criticality >= 75) return "severe";
-  if (criticality >= 58) return "high";
-  if (criticality >= 38) return "moderate";
-  return "low";
 }
 
 // ---------------------------------------------------------------- feed
@@ -435,9 +417,10 @@ export function buildHotspots(
 
     // Persistence-weighted: weeks seen leads, magnitude modulates. The map
     // ranks by criticality; this page is explicitly about chronic emitters.
-    const persistence = Math.round(
-      Math.min(1, weeksSeen / REPEAT_WINDOW_WEEKS) * 65 +
-        Math.min(1, Math.log10(1 + maxRate) / Math.log10(1 + 200)) * 35,
+    const persistence = scorePersistence(
+      weeksSeen,
+      REPEAT_WINDOW_WEEKS,
+      maxRate,
     );
 
     return {

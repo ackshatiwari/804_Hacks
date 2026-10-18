@@ -174,6 +174,10 @@ export function Dashboard({ feed }: { feed: PlumeFeed }) {
           Feed runs {feed.feedLagDays} days behind · locations accurate to about{" "}
           {LOCATION_PRECISION_KM} km
         </span>
+        <span>
+          Criticality is derived from dataset fields (rate and repeat count) —
+          it is not a model prediction.
+        </span>
         <span className="ml-auto">
           Plume detections: SRON via CAMS (CC-BY 4.0, Schuit et al. 2023)
         </span>

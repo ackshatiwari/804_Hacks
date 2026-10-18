@@ -1,4 +1,4 @@
-import { fetchFeed } from "@/lib/feed";
+import { getWeeklyFeed } from "@/lib/datasource";
 
 /**
  * The weekly feed as JSON, for the Python side and anyone who wants the data.
@@ -7,6 +7,6 @@ import { fetchFeed } from "@/lib/feed";
  * count, weekly history and criticality - the same objects the map renders.
  */
 export async function GET() {
-  const feed = await fetchFeed();
+  const feed = await getWeeklyFeed();
   return Response.json(feed);
 }

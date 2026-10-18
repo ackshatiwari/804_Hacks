@@ -1,9 +1,5 @@
-import { readFile } from "node:fs/promises";
-import path from "node:path";
-
-import { cacheLife } from "next/cache";
-
 import { Reveal } from "@/components/Reveal";
+import { getModelMetrics, usingApi } from "@/lib/datasource";
 import {
   LOCATION_PRECISION_KM,
   REPEAT_WINDOW_WEEKS,
@@ -13,40 +9,6 @@ import {
 export const metadata = { title: "Model & method · Methane Watch" };
 
 const SECTION = "mx-auto w-full max-w-[920px] px-5";
-
-type Metrics = {
-  threshold: number;
-  test: {
-    precision: number;
-    recall: number;
-    f1: number;
-    average_precision: number;
-    support: number;
-    n: number;
-  };
-  counts: { train: number; val: number; test: number };
-};
-
-/**
- * Model metrics are published by the training run as public/model-metrics.json.
- * Until that file exists the page says so rather than showing placeholder
- * numbers - a method page that invents its own scores is worse than no page.
- */
-async function loadMetrics(): Promise<Metrics | null> {
-  "use cache";
-  cacheLife("hours");
-
-  try {
-    const raw = await readFile(
-      path.join(process.cwd(), "public", "model-metrics.json"),
-      "utf8",
-    );
-    const m = JSON.parse(raw);
-    return typeof m?.test?.f1 === "number" ? (m as Metrics) : null;
-  } catch {
-    return null;
-  }
-}
 
 function Figure({ label, value, note }: { label: string; value: string; note?: string }) {
   return (
@@ -73,7 +35,7 @@ function Block({ eyebrow, title, children }: { eyebrow: string; title: string; c
 }
 
 export default async function MethodPage() {
-  const m = await loadMetrics();
+  const m = await getModelMetrics();
 
   return (
     <main className={`${SECTION} py-14`}>
@@ -130,16 +92,15 @@ export default async function MethodPage() {
       {m ? (
         <Reveal>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <Figure label="Precision" value={m.test.precision.toFixed(3)} note="Of the patches called a plume, how many were." />
-            <Figure label="Recall" value={m.test.recall.toFixed(3)} note="Of the real plumes, how many were found." />
-            <Figure label="F1" value={m.test.f1.toFixed(3)} note="The balance of the two." />
-            <Figure label="Avg precision" value={m.test.average_precision.toFixed(3)} note="Area under the precision-recall curve." />
+            <Figure label="Precision" value={m.precision.toFixed(3)} note="Of the patches called a plume, how many were." />
+            <Figure label="Recall" value={m.recall.toFixed(3)} note="Of the real plumes, how many were found." />
+            <Figure label="F1" value={m.f1.toFixed(3)} note="The balance of the two." />
+            <Figure label="ROC AUC" value={(m.roc_auc ?? 0).toFixed(3)} note="Separability across all thresholds." />
           </div>
           <p className="mt-4" style={{ fontSize: "var(--t-12)", color: "var(--text-muted)" }}>
-            Measured on {m.test.n.toLocaleString()} held-out patches
-            ({m.test.support.toLocaleString()} real plumes) at a threshold of{" "}
-            {m.threshold.toFixed(2)} chosen on validation. Trained on{" "}
-            {m.counts.train.toLocaleString()} patches.
+            Published by the backend{m.n_test ? ` from ${m.n_test.toLocaleString()} held-out patches` : ""}
+            {m.threshold ? ` at a threshold of ${m.threshold.toFixed(2)}` : ""}. These are the
+            model&rsquo;s own figures, not derived by this frontend.
           </p>
         </Reveal>
       ) : (
@@ -152,15 +113,20 @@ export default async function MethodPage() {
               blank than fill it with numbers nothing produced.
             </p>
             <p className="mt-3" style={{ fontSize: "var(--t-12)", color: "var(--text-muted)", margin: "12px 0 0" }}>
-              A training run drops its results at{" "}
-              <code style={{ color: "var(--text-secondary)" }}>public/model-metrics.json</code>{" "}
-              and this section fills itself in.
+              {usingApi()
+                ? "The backend is connected but has not published metrics yet."
+                : "Set NEXT_PUBLIC_API_BASE_URL to connect the model service; this section then fills itself in from GET /model/metrics."}
             </p>
           </div>
         </Reveal>
       )}
 
       <Block eyebrow="Step three" title="Scoring a week">
+        <p>
+          Neither score below is a model output. Both are computed by this
+          frontend from fields already in the detection dataset, and are
+          labelled that way wherever they appear.
+        </p>
         <p>
           <strong style={{ color: "var(--text-primary)" }}>Criticality</strong> (0&ndash;100) ranks the map. Emission rate carries
           most of the weight because it is a measured quantity; how often the
