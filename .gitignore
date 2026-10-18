@@ -45,6 +45,10 @@ frontend/next-env.d.ts
 # backend
 backend/venv
 backend/data/methane
+backend/data/scans/alerts.db
+backend/data/scans/outbox/
+backend/data/scans/backfill.log
+
 # copied from node_modules by postinstall
 frontend/public/maplibre-gl-worker.mjs
 __pycache__/
