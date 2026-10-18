@@ -1,0 +1,4 @@
+# Serving the API only (e.g. on Render). Scanning and training need requirements.txt.
+fastapi==0.146.0
+numpy==2.5.4
+uvicorn==0.54.0

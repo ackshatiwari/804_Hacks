@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import * as maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { getJSON, type Plume, type PlumesResponse } from "@/lib/api";
+import AlertSignup from "./AlertSignup";
 import PlumeDetail from "./PlumeDetail";
 
 const STYLE_URL = "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
@@ -31,6 +32,26 @@ const radius = (scale: number): maplibregl.ExpressionSpecification => [
 ];
 const color: maplibregl.ExpressionSpecification = ["case", ["get", "repeat"], "#fb923c", "#fcd34d"];
 
+/** A circle of `miles` around [lon, lat] as a polygon, for the alert area. */
+function circle(center: [number, number] | null, miles: number): GeoJSON.FeatureCollection {
+  if (!center) return { type: "FeatureCollection", features: [] };
+  const [lon, lat] = center.map((d) => (d * Math.PI) / 180);
+  const d = miles / 3958.8; // angular distance on a sphere with Earth's radius in miles
+  const ring = Array.from({ length: 65 }, (_, i) => {
+    const b = (i / 64) * 2 * Math.PI;
+    const lat2 = Math.asin(Math.sin(lat) * Math.cos(d) + Math.cos(lat) * Math.sin(d) * Math.cos(b));
+    const lon2 = lon + Math.atan2(Math.sin(b) * Math.sin(d) * Math.cos(lat), Math.cos(d) - Math.sin(lat) * Math.sin(lat2));
+    return [(lon2 * 180) / Math.PI, (lat2 * 180) / Math.PI];
+  });
+  return {
+    type: "FeatureCollection",
+    features: [
+      { type: "Feature", geometry: { type: "Polygon", coordinates: [ring] }, properties: {} },
+      { type: "Feature", geometry: { type: "Point", coordinates: center }, properties: {} },
+    ],
+  };
+}
+
 export default function PlumeMap() {
   const container = useRef<HTMLDivElement>(null);
   const map = useRef<maplibregl.Map | null>(null);
@@ -40,10 +61,22 @@ export default function PlumeMap() {
   const [minConfidence, setMinConfidence] = useState(DEFAULT_MIN_CONFIDENCE);
   const [repeatsOnly, setRepeatsOnly] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [alertOpen, setAlertOpen] = useState(false);
+  const [alertPoint, setAlertPoint] = useState<[number, number] | null>(null);
+  const [alertRadius, setAlertRadius] = useState(100);
+  const alertOpenRef = useRef(false);
 
   useEffect(() => {
     getJSON<PlumesResponse>("/api/plumes?days=7")
-      .then(setData)
+      .then((d) => {
+        setData(d);
+        // Links in alert emails open /map?plume=<id>
+        const linked = d.plumes.find((p) => p.id === new URLSearchParams(window.location.search).get("plume"));
+        if (linked) {
+          setSelectedId(linked.id);
+          map.current?.flyTo({ center: [linked.lon, linked.lat], zoom: 5 });
+        }
+      })
       .catch(() => setError("Couldn't reach the Methane Watch API. Is the backend running on port 8000?"));
   }, []);
 
@@ -57,6 +90,28 @@ export default function PlumeMap() {
     });
     m.addControl(new maplibregl.NavigationControl({ showCompass: false }), "bottom-right");
     m.on("load", () => {
+      m.addSource("alert-area", { type: "geojson", data: circle(null, 0) });
+      m.addLayer({
+        id: "alert-fill",
+        type: "fill",
+        source: "alert-area",
+        filter: ["==", ["geometry-type"], "Polygon"],
+        paint: { "fill-color": "#38bdf8", "fill-opacity": 0.08 },
+      });
+      m.addLayer({
+        id: "alert-line",
+        type: "line",
+        source: "alert-area",
+        filter: ["==", ["geometry-type"], "Polygon"],
+        paint: { "line-color": "#38bdf8", "line-width": 1.5, "line-dasharray": [2, 2] },
+      });
+      m.addLayer({
+        id: "alert-center",
+        type: "circle",
+        source: "alert-area",
+        filter: ["==", ["geometry-type"], "Point"],
+        paint: { "circle-radius": 4, "circle-color": "#38bdf8", "circle-stroke-width": 2, "circle-stroke-color": "#09090b" },
+      });
       m.addSource("plumes", { type: "geojson", data: toGeoJSON([]) });
       m.addLayer({
         id: "plume-glow",
@@ -95,6 +150,10 @@ export default function PlumeMap() {
         },
       });
       m.on("click", "plume-dot", (e) => setSelectedId(e.features?.[0]?.properties.id ?? null));
+      m.on("click", (e) => {
+        if (!alertOpenRef.current || m.queryRenderedFeatures(e.point, { layers: ["plume-dot"] }).length) return;
+        setAlertPoint([e.lngLat.lng, e.lngLat.lat]);
+      });
       m.on("mouseenter", "plume-dot", () => (m.getCanvas().style.cursor = "pointer"));
       m.on("mouseleave", "plume-dot", () => (m.getCanvas().style.cursor = ""));
       setLoaded(true);
@@ -122,6 +181,19 @@ export default function PlumeMap() {
     if (!loaded || !map.current) return;
     map.current.setFilter("plume-selected", ["==", ["get", "id"], selectedId ?? ""]);
   }, [loaded, selectedId]);
+
+  useEffect(() => {
+    alertOpenRef.current = alertOpen;
+    if (!loaded || !map.current) return;
+    map.current.getSource<maplibregl.GeoJSONSource>("alert-area")?.setData(circle(alertOpen ? alertPoint : null, alertRadius));
+    map.current.getCanvas().style.cursor = alertOpen ? "crosshair" : "";
+  }, [loaded, alertOpen, alertPoint, alertRadius]);
+
+  function openAlerts() {
+    const c = map.current?.getCenter();
+    setAlertPoint((p) => p ?? (c ? [c.lng, c.lat] : null));
+    setAlertOpen(true);
+  }
 
   const threshold = data?.threshold ?? 0.5;
   const repeatCount = visible.filter((p) => p.repeat_count >= 2).length;
@@ -189,6 +261,23 @@ export default function PlumeMap() {
             <span className="h-2 w-2 rounded-full bg-orange-400 ring-2 ring-orange-400/30" /> Repeat spot
           </span>
         </div>
+
+        {alertOpen ? (
+          <AlertSignup
+            point={alertPoint}
+            radiusMiles={alertRadius}
+            onRadiusChange={setAlertRadius}
+            onClose={() => setAlertOpen(false)}
+          />
+        ) : (
+          <button
+            type="button"
+            onClick={openAlerts}
+            className="mt-4 h-8 w-full rounded-full border border-white/10 text-xs font-medium text-zinc-200 transition-colors hover:border-sky-400/50 hover:text-sky-300"
+          >
+            Email me about plumes near a place
+          </button>
+        )}
       </div>
 
       {selected && (

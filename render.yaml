@@ -1,0 +1,22 @@
+# Render Blueprint for the API. Scans run locally; commit backend/data/scans and push to update the data.
+services:
+  - type: web
+    name: methane-watch-api
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements-server.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.15
+      - key: FRONTEND_ORIGINS  # your Vercel URL, e.g. https://methane-watch.vercel.app
+        sync: false
+      - key: SITE_URL  # same Vercel URL, used for links in alert emails
+        sync: false
+      - key: API_PUBLIC_URL  # this service's own URL, e.g. https://methane-watch-api.onrender.com
+        sync: false
+      - key: ALERT_FROM
+        sync: false
+      - key: BREVO_API_KEY  # free tier blocks SMTP; use Brevo, or a paid instance with the SMTP_* settings
+        sync: false

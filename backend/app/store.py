@@ -6,6 +6,7 @@ from pathlib import Path
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "scans"
 DB_PATH = DATA_DIR / "scans.db"
+ALERTS_DB_PATH = DATA_DIR / "alerts.db"
 IMAGE_DIR = DATA_DIR / "images"
 
 SCHEMA = """
@@ -27,14 +28,32 @@ CREATE TABLE IF NOT EXISTS detections (
 CREATE INDEX IF NOT EXISTS detections_date ON detections (date);
 """
 
+ALERTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS subscriptions (
+    id INTEGER PRIMARY KEY,
+    email TEXT NOT NULL,
+    lat REAL NOT NULL,
+    lon REAL NOT NULL,
+    radius_miles REAL NOT NULL,
+    token TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS alerts_sent (
+    sub_id INTEGER NOT NULL,
+    det_id TEXT NOT NULL,
+    sent_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (sub_id, det_id)
+);
+"""
+
 
 @contextmanager
-def connect():
+def connect(path=DB_PATH):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     IMAGE_DIR.mkdir(exist_ok=True)
-    con = sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(path)
     con.row_factory = sqlite3.Row
-    con.executescript(SCHEMA)
+    con.executescript(ALERTS_SCHEMA if path == ALERTS_DB_PATH else SCHEMA)
     try:
         yield con
         con.commit()
@@ -79,3 +98,36 @@ def summary():
     with connect() as con:
         rows = con.execute("SELECT * FROM scanned_days ORDER BY date").fetchall()
         return [dict(r) for r in rows]
+
+
+def add_subscription(email, lat, lon, radius_miles, token):
+    with connect(ALERTS_DB_PATH) as con:
+        cur = con.execute("INSERT INTO subscriptions (email, lat, lon, radius_miles, token) VALUES (?, ?, ?, ?, ?)",
+                          (email, lat, lon, radius_miles, token))
+        return cur.lastrowid
+
+
+def subscriptions():
+    with connect(ALERTS_DB_PATH) as con:
+        return [dict(r) for r in con.execute("SELECT * FROM subscriptions")]
+
+
+def delete_subscription(token):
+    with connect(ALERTS_DB_PATH) as con:
+        row = con.execute("SELECT id FROM subscriptions WHERE token = ?", (token,)).fetchone()
+        if row is None:
+            return False
+        con.execute("DELETE FROM alerts_sent WHERE sub_id = ?", (row["id"],))
+        con.execute("DELETE FROM subscriptions WHERE id = ?", (row["id"],))
+        return True
+
+
+def sent_ids(sub_id):
+    with connect(ALERTS_DB_PATH) as con:
+        return {r["det_id"] for r in con.execute("SELECT det_id FROM alerts_sent WHERE sub_id = ?", (sub_id,))}
+
+
+def mark_sent(sub_id, det_ids):
+    with connect(ALERTS_DB_PATH) as con:
+        con.executemany("INSERT OR IGNORE INTO alerts_sent (sub_id, det_id) VALUES (?, ?)",
+                        [(sub_id, d) for d in det_ids])

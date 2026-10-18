@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import scan  # noqa: E402
+from app import alerts, scan  # noqa: E402
 from app.model import Detector  # noqa: E402
 
 
@@ -31,6 +31,7 @@ def main():
     days = scan.recent_days(end, args.days)
     print(f"Scanning {days[0]} to {days[-1]}")
     scan.scan_days(Detector(), days, rescan=args.rescan)
+    print(f"Sent {alerts.send_digests()} alert emails")
 
 
 if __name__ == "__main__":
