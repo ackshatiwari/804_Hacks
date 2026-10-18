@@ -1,42 +1,24 @@
 """
-Build a plume / no-plume methane patch dataset from Sentinel-5P (TROPOMI).
+Build a plume / no-plume methane patch dataset from Sentinel-5P.
 
-Labels come from the SRON plume detections published through the CAMS
-Methane Hotspot Explorer (CC-BY 4.0, cite Schuit et al. 2023). Imagery comes
-from Google Earth Engine's COPERNICUS/S5P/OFFL/L3_CH4 collection.
+Labels: SRON plume detections via CAMS (CC-BY 4.0, cite Schuit et al. 2023).
+Imagery: Google Earth Engine COPERNICUS/S5P/OFFL/L3_CH4.
 
-Pipeline
-    1. Download the cumulative plume CSV (all detections since 2024-05-01).
-    2. Plume patches: one PATCH x PATCH window centred on each detection,
-       on the day it was observed.
-    3. No-plume patches (NEG_PER_POS per plume, split evenly between):
-         - random:    random location on a plume date, far from any detection
-         - same_spot: a known plume location on a day with no detection there
-    4. Drop patches with too many missing pixels (clouds / no retrieval).
-    5. Split train / val / test by date (70 / 15 / 15), not at random, so
-       recent weeks are never seen during training.
+Output (backend/data/methane/):
+    {train,val,test}/{plume,no_plume}/<id>.npy  float32 (2, H, W):
+        [0] CH4 enhancement in ppb (value - patch median), NaN -> 0
+        [1] valid-pixel mask
+    .../<id>.png   heatmap preview
+    metadata.csv
 
-Output (under backend/data/methane/ by default)
-    {train,val,test}/{plume,no_plume}/<id>.npy   float32, shape (2, H, W)
-        channel 0: CH4 enhancement in ppb (value - patch median), NaN -> 0
-        channel 1: valid-pixel mask (1 = retrieval present)
-    {train,val,test}/{plume,no_plume}/<id>.png   heatmap preview
-    metadata.csv                                 one row per kept sample
-
-Setup
-    pip install earthengine-api pandas numpy matplotlib requests
-    earthengine authenticate
-
-Usage
-    python backend/scripts/build_dataset.py --project <your-gcp-project-id>
-    python backend/scripts/build_dataset.py --project <id> --limit 50   # quick test
+Setup:  pip install earthengine-api pandas numpy matplotlib requests tqdm
+Usage:  python backend/scripts/build_dataset.py --project <gcp-project-id> [--limit 50]
 """
 
 import argparse
 import io
 import time
-from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import ee
@@ -47,278 +29,195 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import requests
+from tqdm import tqdm
 
 PLUMES_CSV_URL = "https://sites.ecmwf.int/data/cams/products/methane_emissions/data/data.csv"
 COLLECTION = "COPERNICUS/S5P/OFFL/L3_CH4"
 BAND = "CH4_column_volume_mixing_ratio_dry_air_bias_corrected"
 NODATA = -9999.0
-EARTH_RADIUS_KM = 6371.0
-
-BACKEND_ROOT = Path(__file__).resolve().parent.parent
+SPLIT_QUANTILES = (0.70, 0.85)  # train ends / val ends, by date
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser()
     p.add_argument("--project", required=True, help="Google Cloud project registered for Earth Engine")
-    p.add_argument("--out", type=Path, default=BACKEND_ROOT / "data" / "methane")
-    p.add_argument("--csv", type=Path, help="Use a local plume CSV instead of downloading it")
+    p.add_argument("--out", type=Path, default=Path(__file__).resolve().parent.parent / "data" / "methane")
+    p.add_argument("--csv", type=Path, help="Local plume CSV instead of downloading")
+    p.add_argument("--start", help="Only plumes on/after this date (YYYY-MM-DD)")
+    p.add_argument("--limit", type=int, help="Use at most this many plumes (quick test)")
     p.add_argument("--patch", type=int, default=32, help="Patch size in pixels")
-    p.add_argument("--pixel-deg", type=float, default=0.07, help="Pixel size in degrees (~7 km, TROPOMI native)")
+    p.add_argument("--pixel-deg", type=float, default=0.07, help="Pixel size in degrees (~7 km)")
     p.add_argument("--neg-per-pos", type=int, default=3, help="No-plume patches per plume patch")
-    p.add_argument("--neg-min-dist-km", type=float, default=150.0,
-                   help="No detection may lie this close to a no-plume patch centre (patch is ~224 km wide)")
-    p.add_argument("--min-valid", type=float, default=0.5, help="Minimum fraction of valid pixels to keep a patch")
-    p.add_argument("--split", type=float, nargs=2, default=[0.70, 0.85],
-                   help="Date quantiles where train ends and val ends")
-    p.add_argument("--start", help="Only use plumes on/after this date (YYYY-MM-DD)")
-    p.add_argument("--end", help="Only use plumes on/before this date (YYYY-MM-DD)")
-    p.add_argument("--limit", type=int, help="Use at most this many plumes (for a quick test run)")
+    p.add_argument("--neg-min-dist-km", type=float, default=150.0, help="Min distance from any detection")
+    p.add_argument("--min-valid", type=float, default=0.5, help="Min fraction of valid pixels to keep")
     p.add_argument("--workers", type=int, default=8, help="Parallel Earth Engine requests")
     p.add_argument("--seed", type=int, default=42)
     return p.parse_args()
 
 
-# ---------------------------------------------------------------- labels
-
 def load_plumes(args):
-    if args.csv:
-        df = pd.read_csv(args.csv)
-    else:
-        print(f"Downloading plume list from {PLUMES_CSV_URL}")
-        resp = requests.get(PLUMES_CSV_URL, timeout=60)
-        resp.raise_for_status()
-        df = pd.read_csv(io.StringIO(resp.text))
+    src = args.csv or io.StringIO(requests.get(PLUMES_CSV_URL, timeout=60).text)
+    df = pd.read_csv(src)
+    df.columns = df.columns.str.lower().str.strip()
+    missing = {"date", "lat", "lon"} - set(df.columns)
+    if missing:
+        raise SystemExit(f"Plume CSV missing {missing}. Columns: {list(df.columns)}")
 
-    # Column names per the CAMS docs (date, lat, lon); match case-insensitively
-    # in case the file header differs slightly.
-    cols = {c.lower().strip(): c for c in df.columns}
-    for needed in ("date", "lat", "lon"):
-        if needed not in cols:
-            raise SystemExit(f"Plume CSV has no '{needed}' column. Columns found: {list(df.columns)}")
-
-    out = pd.DataFrame({
-        "date": pd.to_datetime(df[cols["date"]].astype(str), format="%Y%m%d", errors="coerce"),
-        "lat": pd.to_numeric(df[cols["lat"]], errors="coerce"),
-        "lon": pd.to_numeric(df[cols["lon"]], errors="coerce"),
-    })
-    for extra in ("source_rate_t/h", "source_type", "source_country"):
-        if extra in cols:
-            out[extra] = df[cols[extra]]
-
-    out = out.dropna(subset=["date", "lat", "lon"])
+    df = pd.DataFrame({
+        "date": pd.to_datetime(df["date"].astype(str), format="%Y%m%d", errors="coerce"),
+        "lat": pd.to_numeric(df["lat"], errors="coerce"),
+        "lon": pd.to_numeric(df["lon"], errors="coerce"),
+    }).dropna()
     if args.start:
-        out = out[out["date"] >= pd.Timestamp(args.start)]
-    if args.end:
-        out = out[out["date"] <= pd.Timestamp(args.end)]
-    out = out.sort_values("date").reset_index(drop=True)
+        df = df[df["date"] >= pd.Timestamp(args.start)]
     if args.limit:
-        out = out.sample(n=min(args.limit, len(out)), random_state=args.seed).sort_values("date").reset_index(drop=True)
-
-    print(f"{len(out)} plume detections from {out['date'].min():%Y-%m-%d} to {out['date'].max():%Y-%m-%d}")
-    return out
-
-
-def haversine_km(lat1, lon1, lat2, lon2):
-    lat1, lon1, lat2, lon2 = map(np.radians, (lat1, lon1, lat2, lon2))
-    a = np.sin((lat2 - lat1) / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin((lon2 - lon1) / 2) ** 2
-    return 2 * EARTH_RADIUS_KM * np.arcsin(np.sqrt(a))
+        df = df.sample(n=min(args.limit, len(df)), random_state=args.seed)
+    return df.sort_values("date").reset_index(drop=True)
 
 
 def near_detection(plumes, lat, lon, date, days, km):
     """True if any detection lies within `km` of (lat, lon) within +/- `days` of `date`."""
-    window = plumes[(plumes["date"] - date).abs() <= pd.Timedelta(days=days)]
-    if window.empty:
+    w = plumes[(plumes["date"] - date).abs() <= pd.Timedelta(days=days)]
+    if w.empty:
         return False
-    return bool((haversine_km(lat, lon, window["lat"].values, window["lon"].values) < km).any())
+    lat1, lon1, lat2, lon2 = map(np.radians, (lat, lon, w["lat"].values, w["lon"].values))
+    a = np.sin((lat2 - lat1) / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin((lon2 - lon1) / 2) ** 2
+    return bool((2 * 6371 * np.arcsin(np.sqrt(a)) < km).any())
 
 
-# ---------------------------------------------------------------- imagery
-
-def fetch_patch(lat, lon, date, args, retries=4):
-    """Return the raw CH4 patch (ppb, NaN where missing), or None if there is no data that day."""
+def fetch_patch(lat, lon, date, args):
+    """Raw CH4 patch in ppb (NaN where missing), or None if no data that day."""
     day = ee.Date(date.strftime("%Y-%m-%d"))
-    image = (ee.ImageCollection(COLLECTION)
-             .filterDate(day, day.advance(1, "day"))
-             .select(BAND)
-             .mosaic()
-             .unmask(NODATA))
+    image = (ee.ImageCollection(COLLECTION).filterDate(day, day.advance(1, "day"))
+             .select(BAND).mosaic().unmask(NODATA))
     half = args.patch * args.pixel_deg / 2
     request = {
         "expression": image,
         "fileFormat": "NUMPY_NDARRAY",
         "grid": {
             "dimensions": {"width": args.patch, "height": args.patch},
-            "affineTransform": {
-                "scaleX": args.pixel_deg, "shearX": 0, "translateX": lon - half,
-                "shearY": 0, "scaleY": -args.pixel_deg, "translateY": lat + half,
-            },
+            "affineTransform": {"scaleX": args.pixel_deg, "shearX": 0, "translateX": lon - half,
+                                "shearY": 0, "scaleY": -args.pixel_deg, "translateY": lat + half},
             "crsCode": "EPSG:4326",
         },
     }
-    for attempt in range(retries):
+    for attempt in range(4):
         try:
-            arr = ee.data.computePixels(request)
-            break
-        except ee.EEException as e:
-            msg = str(e).lower()
-            transient = any(s in msg for s in ("too many requests", "quota", "deadline", "timed out", "unavailable"))
-            if not transient or attempt == retries - 1:
-                return None  # e.g. no overpass that day -> mosaic has no bands
+            raw = np.asarray(ee.data.computePixels(request)[BAND], dtype=np.float32)
+            raw[raw <= NODATA + 1] = np.nan
+            return raw
+        except Exception as e:  # timeouts and network errors are retried
+            transient = any(s in str(e).lower() for s in ("too many", "quota", "deadline", "timed out", "unavailable"))
+            if isinstance(e, ee.EEException) and not transient:
+                return None  # e.g. no overpass that day
             time.sleep(2 ** attempt)
-        except requests.exceptions.RequestException:
-            if attempt == retries - 1:
-                return None
-            time.sleep(2 ** attempt)
-
-    raw = np.asarray(arr[BAND], dtype=np.float32)
-    raw[raw <= NODATA + 1] = np.nan
-    return raw
+    return None
 
 
-def to_channels(raw):
-    valid = ~np.isnan(raw)
-    enhancement = np.where(valid, raw - np.nanmedian(raw), 0.0)
-    return np.stack([enhancement, valid.astype(np.float32)]).astype(np.float32)
+def process(s, args):
+    """Fetch and save one sample; returns it with valid_frac, or None if rejected."""
+    path = args.out / s["split"] / s["label"] / f"{s['id']}.npy"
+    if path.exists():  # resume; a file cut off by Ctrl+C is re-fetched
+        try:
+            return {**s, "valid_frac": round(float(np.load(path)[1].mean()), 3)}
+        except Exception:
+            path.unlink()
 
-
-def save_preview(raw, path):
-    fig, ax = plt.subplots(figsize=(2, 2), dpi=64)
-    vmin, vmax = np.nanpercentile(raw, [2, 98])
-    ax.imshow(raw, cmap="inferno", vmin=vmin, vmax=vmax, interpolation="nearest")
-    ax.set_axis_off()
-    fig.subplots_adjust(0, 0, 1, 1)
-    fig.savefig(path)
-    plt.close(fig)
-
-
-# ---------------------------------------------------------------- samples
-
-def split_for(date, cuts):
-    if date <= cuts[0]:
-        return "train"
-    if date <= cuts[1]:
-        return "val"
-    return "test"
-
-
-def make_sample(kind, label, lat, lon, date, cuts, idx, extra=None):
-    split = split_for(date, cuts)
-    sample_id = f"{kind}_{date:%Y%m%d}_{lat:+.2f}_{lon:+.2f}_{idx}"
-    s = {"id": sample_id, "label": label, "kind": kind, "split": split,
-         "date": date.strftime("%Y-%m-%d"), "lat": round(lat, 4), "lon": round(lon, 4)}
-    if extra:
-        s.update(extra)
-    return s
-
-
-def process(sample, args):
-    """Fetch + save one sample. Returns the sample with valid_frac set, or None if rejected."""
-    folder = args.out / sample["split"] / sample["label"]
-    npy_path = folder / f"{sample['id']}.npy"
-
-    if npy_path.exists():  # resume
-        valid_frac = float(np.load(npy_path)[1].mean())
-        return {**sample, "valid_frac": round(valid_frac, 3), "path": npy_path.relative_to(args.out).as_posix()}
-
-    raw = fetch_patch(sample["lat"], sample["lon"], pd.Timestamp(sample["date"]), args)
+    raw = fetch_patch(s["lat"], s["lon"], pd.Timestamp(s["date"]), args)
     if raw is None:
         return None
-    valid_frac = float((~np.isnan(raw)).mean())
-    if valid_frac < args.min_valid:
+    valid = ~np.isnan(raw)
+    if valid.mean() < args.min_valid:
         return None
 
-    folder.mkdir(parents=True, exist_ok=True)
-    np.save(npy_path, to_channels(raw))
-    save_preview(raw, npy_path.with_suffix(".png"))
-    return {**sample, "valid_frac": round(valid_frac, 3), "path": npy_path.relative_to(args.out).as_posix()}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    enhancement = np.where(valid, raw - np.nanmedian(raw), 0.0)
+    np.save(path, np.stack([enhancement, valid]).astype(np.float32))
+
+    fig, ax = plt.subplots(figsize=(2, 2), dpi=64)
+    ax.imshow(raw, cmap="inferno", vmin=np.nanpercentile(raw, 2), vmax=np.nanpercentile(raw, 98))
+    ax.set_axis_off()
+    fig.subplots_adjust(0, 0, 1, 1)
+    fig.savefig(path.with_suffix(".png"))
+    plt.close(fig)
+    return {**s, "valid_frac": round(float(valid.mean()), 3)}
 
 
-def run_batch(samples, args, pool):
-    return [r for r in pool.map(lambda s: process(s, args), samples) if r is not None]
+def sample(kind, label, lat, lon, date, cuts, idx):
+    split = "train" if date <= cuts[0] else "val" if date <= cuts[1] else "test"
+    return {"id": f"{kind}_{date:%Y%m%d}_{lat:+.2f}_{lon:+.2f}_{idx}", "label": label, "kind": kind,
+            "split": split, "date": date.strftime("%Y-%m-%d"), "lat": round(lat, 4), "lon": round(lon, 4)}
 
 
-def random_negative(plumes, dates, rng, args, cuts, idx):
-    for _ in range(100):
-        date = dates[rng.integers(len(dates))]
-        lat = float(rng.uniform(-56, 70))
-        lon = float(rng.uniform(-178, 178))
-        if not near_detection(plumes, lat, lon, date, days=7, km=args.neg_min_dist_km):
-            return make_sample("random", "no_plume", lat, lon, date, cuts, idx)
-    return None
-
-
-def same_spot_negative(plumes, rng, args, cuts, idx, first, last):
-    for _ in range(100):
-        p = plumes.iloc[rng.integers(len(plumes))]
-        offset = int(rng.integers(7, 57)) * (1 if rng.random() < 0.5 else -1)
-        date = p["date"] + timedelta(days=offset)
-        if not (first <= date <= last):
-            continue
-        if not near_detection(plumes, p["lat"], p["lon"], date, days=1, km=args.neg_min_dist_km):
-            return make_sample("same_spot", "no_plume", p["lat"], p["lon"], date, cuts, idx)
-    return None
-
-
-def collect_negatives(kind, quota, plumes, rng, args, cuts, pool, start_idx):
-    """Keep generating candidates until `quota` valid patches are saved (or we give up)."""
-    dates = plumes["date"].tolist()
+def negative_candidate(kind, plumes, rng, args, cuts, idx):
+    """random: random place on a plume date. same_spot: a plume location on a no-detection day."""
     first, last = plumes["date"].min(), plumes["date"].max()
-    kept, idx, rounds = [], start_idx, 0
-    while len(kept) < quota and rounds < 10:
-        need = quota - len(kept)
-        batch = []
-        for _ in range(need * 2):
-            if kind == "random":
-                s = random_negative(plumes, dates, rng, args, cuts, idx)
-            else:
-                s = same_spot_negative(plumes, rng, args, cuts, idx, first, last)
-            idx += 1
-            if s:
-                batch.append(s)
-        kept.extend(run_batch(batch, args, pool)[:need])
-        rounds += 1
-        print(f"  {kind}: {len(kept)}/{quota}")
+    for _ in range(100):
+        if kind == "random":
+            date = plumes["date"].iloc[rng.integers(len(plumes))]
+            lat, lon, days = float(rng.uniform(-56, 70)), float(rng.uniform(-178, 178)), 7
+        else:
+            p = plumes.iloc[rng.integers(len(plumes))]
+            date = p["date"] + pd.Timedelta(days=int(rng.integers(7, 57)) * rng.choice([-1, 1]))
+            lat, lon, days = p["lat"], p["lon"], 1
+            if not first <= date <= last:
+                continue
+        if not near_detection(plumes, lat, lon, date, days, args.neg_min_dist_km):
+            return sample(kind, "no_plume", lat, lon, date, cuts, idx)
+    return None
+
+
+def collect_negatives(kind, quota, plumes, rng, args, cuts, pool, idx):
+    """Generate candidates in batches until `quota` valid patches are saved."""
+    kept = []
+    with tqdm(total=quota, desc=f"no_plume ({kind})", unit="patch") as bar:
+        for _ in range(10):
+            need = quota - len(kept)
+            if need <= 0:
+                break
+            batch = [c for i in range(need * 2)
+                     if (c := negative_candidate(kind, plumes, rng, args, cuts, idx + i))]
+            idx += need * 2
+            for f in as_completed([pool.submit(process, s, args) for s in batch]):
+                r = f.result()
+                if r and len(kept) < quota:
+                    kept.append(r)
+                    bar.update(1)
     return kept, idx
 
-
-# ---------------------------------------------------------------- main
 
 def main():
     args = parse_args()
     rng = np.random.default_rng(args.seed)
-
     ee.Initialize(project=args.project)
+    ee.data.setDeadline(60_000)  # ms; a hung request fails instead of blocking forever
+
     plumes = load_plumes(args)
     if plumes.empty:
         raise SystemExit("No plumes to process.")
+    cuts = [plumes["date"].quantile(q) for q in SPLIT_QUANTILES]
+    print(f"{len(plumes)} plumes, {plumes['date'].min():%Y-%m-%d} to {plumes['date'].max():%Y-%m-%d}")
+    print(f"Split: train <= {cuts[0]:%Y-%m-%d} < val <= {cuts[1]:%Y-%m-%d} < test")
 
-    cuts = [plumes["date"].quantile(q) for q in args.split]
-    print(f"Split by date: train <= {cuts[0]:%Y-%m-%d} < val <= {cuts[1]:%Y-%m-%d} < test")
-
-    extra_cols = [c for c in plumes.columns if c not in ("date", "lat", "lon")]
-    positives = [
-        make_sample("plume", "plume", r["lat"], r["lon"], r["date"], cuts, i, {c: r[c] for c in extra_cols})
-        for i, r in plumes.iterrows()
-    ]
+    positives = [sample("plume", "plume", r.lat, r.lon, r.date, cuts, i)
+                 for i, r in enumerate(plumes.itertuples())]
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        print(f"Fetching {len(positives)} plume patches...")
-        kept_pos = run_batch(positives, args, pool)
-        print(f"  kept {len(kept_pos)} (rest had no data or < {args.min_valid:.0%} valid pixels)")
+        futures = [pool.submit(process, s, args) for s in positives]
+        results = [f.result() for f in tqdm(as_completed(futures), total=len(futures), desc="plume", unit="patch")]
+        kept = [r for r in results if r]
+        print(f"Kept {len(kept)}/{len(positives)} plume patches (rest: no data or too few valid pixels)")
 
-        n_neg = len(kept_pos) * args.neg_per_pos
-        n_random = n_neg // 2
-        print(f"Fetching {n_neg} no-plume patches...")
-        neg_random, idx = collect_negatives("random", n_random, plumes, rng, args, cuts, pool, 0)
-        neg_spot, _ = collect_negatives("same_spot", n_neg - n_random, plumes, rng, args, cuts, pool, idx)
+        n_neg = len(kept) * args.neg_per_pos
+        neg_random, idx = collect_negatives("random", n_neg // 2, plumes, rng, args, cuts, pool, 0)
+        neg_spot, _ = collect_negatives("same_spot", n_neg - n_neg // 2, plumes, rng, args, cuts, pool, idx)
 
-    meta = pd.DataFrame(kept_pos + neg_random + neg_spot)
+    meta = pd.DataFrame(kept + neg_random + neg_spot)
+    meta["path"] = meta["split"] + "/" + meta["label"] + "/" + meta["id"] + ".npy"
     args.out.mkdir(parents=True, exist_ok=True)
     meta.to_csv(args.out / "metadata.csv", index=False)
-
-    print("\nDone. Samples per split:")
     print(meta.groupby(["split", "label"]).size().unstack(fill_value=0))
-    print(f"\nMetadata: {args.out / 'metadata.csv'}")
+    print(f"Saved to {args.out}")
 
 
 if __name__ == "__main__":
