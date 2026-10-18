@@ -1,6 +1,12 @@
 import { cacheLife } from "next/cache";
 
-import { buildFeed, parseDetections, PLUMES_CSV_URL, type PlumeFeed } from "./plumes";
+import {
+  buildFeed,
+  emptyFeed,
+  parseDetections,
+  PLUMES_CSV_URL,
+  type PlumeFeed,
+} from "./plumes";
 
 /**
  * Fetch the live CAMS plume list and fold it into the weekly feed.
@@ -17,9 +23,23 @@ export async function fetchFeed(): Promise<PlumeFeed> {
   "use cache";
   cacheLife("hours");
 
-  const res = await fetch(PLUMES_CSV_URL);
-  if (!res.ok) {
-    throw new Error(`CAMS plume feed returned ${res.status} ${res.statusText}`);
+  // The page is prerendered at build time, so an upstream outage must not fail
+  // the build - it degrades to a feed that says what went wrong.
+  try {
+    const res = await fetch(PLUMES_CSV_URL, {
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!res.ok) {
+      return emptyFeed(`CAMS returned ${res.status} ${res.statusText}`);
+    }
+    const detections = parseDetections(await res.text());
+    if (detections.length === 0) {
+      return emptyFeed("CAMS returned no usable detections");
+    }
+    return buildFeed(detections);
+  } catch (err) {
+    return emptyFeed(
+      err instanceof Error ? err.message : "could not reach the CAMS feed",
+    );
   }
-  return buildFeed(parseDetections(await res.text()));
 }

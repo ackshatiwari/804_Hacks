@@ -70,6 +70,8 @@ export type PlumeFeed = {
   feedLagDays: number;
   totalInWindow: number;
   generatedAt: string;
+  /** Set when the upstream feed could not be read; the page says so instead of rendering an empty map as if the week were quiet. */
+  error?: string;
 };
 
 // ---------------------------------------------------------------- geometry
@@ -241,6 +243,11 @@ function daysBetween(fromIso: string, toIso: string): number {
  * Build the weekly feed: the most recent week of plumes, each annotated with
  * how many times its spot was flagged over the preceding REPEAT_WINDOW_WEEKS.
  */
+export function emptyFeed(error: string, now: Date = new Date()): PlumeFeed {
+  const feed = buildFeed([], now);
+  return { ...feed, error };
+}
+
 export function buildFeed(
   detections: Detection[],
   now: Date = new Date(),

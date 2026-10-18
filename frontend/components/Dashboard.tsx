@@ -71,6 +71,16 @@ export function Dashboard({ feed }: { feed: PlumeFeed }) {
         </div>
       </header>
 
+      {feed.error && (
+        <p
+          role="status"
+          className="u-mono border-b border-[var(--ch4-severe)] bg-[var(--ch4-severe)]/12 px-5 py-2 text-[11px] text-[var(--paper)]"
+        >
+          Live detections unavailable &mdash; {feed.error}. Showing no plumes
+          rather than an empty week.
+        </p>
+      )}
+
       <div className="flex min-h-0 flex-1 flex-col-reverse md:flex-row">
         <section
           className="flex w-full min-h-0 flex-col border-[var(--haze)] md:w-[330px] md:border-r"
