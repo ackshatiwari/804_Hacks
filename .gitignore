@@ -44,7 +44,7 @@ frontend/next-env.d.ts
 
 # backend
 backend/venv
-backend/data
+backend/data/methane
 # copied from node_modules by postinstall
 frontend/public/maplibre-gl-worker.mjs
 __pycache__/
